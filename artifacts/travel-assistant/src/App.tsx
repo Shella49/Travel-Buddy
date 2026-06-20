@@ -153,12 +153,11 @@ function ChatInterface() {
                       {msg.role === "user" ? (
                         <div className="whitespace-pre-wrap text-sm">{msg.content}</div>
                       ) : (
-                        <ReactMarkdown 
-                          remarkPlugins={[remarkGfm]} 
-                          className="prose prose-sm dark:prose-invert max-w-none break-words"
-                        >
-                          {msg.content}
-                        </ReactMarkdown>
+                        <div className="prose prose-sm dark:prose-invert max-w-none break-words">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
                       )}
                     </div>
                   </div>
