@@ -126,13 +126,14 @@ export class KiwiMcpClient {
   ): Promise<KiwiFlightResult[]> {
     this.log("tool_call", `Вызов search-flight: ${from} → ${to}, дата: ${dateFrom}`);
     const args = {
-      fly_from: from,
-      fly_to: to,
-      date_from: dateFrom,
-      date_to: dateTo ?? dateFrom,
-      adults: 1,
-      currency: "EUR",
-      limit: 5,
+      flyFrom: from,
+      flyTo: to,
+      departureDate: dateFrom,
+      ...(dateTo && dateTo !== dateFrom ? { returnDate: dateTo } : {}),
+      passengers: { adults: 1, children: 0, infants: 0 },
+      curr: "EUR",
+      locale: "ru",
+      sort: "price",
     };
     this.log("tool_args", "Аргументы запроса", args);
 
@@ -157,7 +158,7 @@ export class KiwiMcpClient {
       });
 
       const text = await response.text();
-      this.log("tool_response", "Ответ от Kiwi MCP получен", { status: response.status });
+      this.log("tool_response", "Ответ от Kiwi MCP получен", { status: response.status, preview: text.slice(0, 300) });
 
       let data: unknown;
       try {

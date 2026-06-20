@@ -77,7 +77,51 @@ export interface AgentMessage {
   content: string;
 }
 
-const SYSTEM_PROMPT = `Ты — Travel Assistant AI, умный помощник для поиска авиабилетов, отелей и достопримечательностей.
+function buildSystemPrompt(): string {
+  const now = new Date();
+  const day = String(now.getDate()).padStart(2, "0");
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const year = now.getFullYear();
+  const todayDDMMYYYY = `${day}/${month}/${year}`;
+  const todayYYYYMMDD = `${year}-${month}-${day}`;
+  const weekdays = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
+  const todayWeekday = weekdays[now.getDay()];
+  // nearest Friday
+  const daysUntilFriday = (5 - now.getDay() + 7) % 7 || 7;
+  const nextFriday = new Date(now);
+  nextFriday.setDate(now.getDate() + daysUntilFriday);
+  const nfDay = String(nextFriday.getDate()).padStart(2, "0");
+  const nfMonth = String(nextFriday.getMonth() + 1).padStart(2, "0");
+  const nfYear = nextFriday.getFullYear();
+  const nextFridayDDMMYYYY = `${nfDay}/${nfMonth}/${nfYear}`;
+  const nextFridayYYYYMMDD = `${nfYear}-${nfMonth}-${nfDay}`;
+  // next Saturday/Sunday
+  const daysUntilSat = (6 - now.getDay() + 7) % 7 || 7;
+  const nextSat = new Date(now);
+  nextSat.setDate(now.getDate() + daysUntilSat);
+  const nsSatDay = String(nextSat.getDate()).padStart(2, "0");
+  const nsSatMonth = String(nextSat.getMonth() + 1).padStart(2, "0");
+  const nsSatYear = nextSat.getFullYear();
+  const nextSun = new Date(nextSat);
+  nextSun.setDate(nextSat.getDate() + 1);
+  const nsSunDay = String(nextSun.getDate()).padStart(2, "0");
+  const nsSunMonth = String(nextSun.getMonth() + 1).padStart(2, "0");
+  const nsSunYear = nextSun.getFullYear();
+
+  return `Ты — Travel Assistant AI, умный помощник для поиска авиабилетов, отелей и достопримечательностей.
+
+ТЕКУЩАЯ ДАТА И ВРЕМЯ (используй ТОЛЬКО эти значения при вычислении дат):
+- Сегодня: ${todayWeekday}, ${day}.${month}.${year}
+- Сегодня в формате dd/mm/yyyy (для Kiwi): ${todayDDMMYYYY}
+- Сегодня в формате YYYY-MM-DD (для отелей): ${todayYYYYMMDD}
+- Ближайшая пятница: ${nextFridayDDMMYYYY} (для Kiwi) / ${nextFridayYYYYMMDD} (для отелей)
+- Ближайшие выходные: суббота ${nsSatDay}.${nsSatMonth}.${nsSatYear}, воскресенье ${nsSunDay}.${nsSunMonth}.${nsSunYear}
+- Год сейчас: ${year}. Никогда не используй прошлые годы (2023, 2024, 2025)!
+
+ПРАВИЛО ДАТ: Все даты ОБЯЗАТЕЛЬНО должны быть в будущем (не ранее сегодня ${todayDDMMYYYY}). При поиске "на следующую пятницу" используй ${nextFridayDDMMYYYY}. При поиске "на выходные" — суббота ${nsSatDay}/${nsSatMonth}/${nsSatYear}.`;
+}
+
+const SYSTEM_PROMPT_STATIC = `
 
 Ты умеешь:
 1. Искать авиабилеты через Kiwi MCP (инструмент: search_flights)
@@ -91,6 +135,7 @@ const SYSTEM_PROMPT = `Ты — Travel Assistant AI, умный помощник
 - Для Kiwi используй IATA коды аэропортов или английские названия городов
 - Форматируй результаты красиво с эмодзи и структурой
 - Если пользователь спрашивает про поездку в целом — ищи и билеты, и отель
+- КРИТИЧЕСКИ ВАЖНО: даты ВСЕГДА должны быть в будущем! Используй текущую дату, указанную выше.
 
 Формат ответа для рейсов:
 ✈️ **Маршрут:** [from] → [to]
@@ -206,7 +251,7 @@ export async function runAgent(
   addLog(makeLog("info", "System", "Запуск Travel Assistant AI агента"));
 
   const conversationMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: buildSystemPrompt() + SYSTEM_PROMPT_STATIC },
     ...messages.map((m) => ({ role: m.role, content: m.content })),
   ];
 
