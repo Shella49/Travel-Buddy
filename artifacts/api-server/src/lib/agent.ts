@@ -293,7 +293,6 @@ export async function runAgent(
       if (fnName === "search_flights") {
         const kiwi = new KiwiMcpClient();
         const initialized = await kiwi.initialize();
-        kiwi.getLogs().forEach(addLog);
 
         if (initialized) {
           const flights = await kiwi.searchFlights(
@@ -302,7 +301,7 @@ export async function runAgent(
             args.date_from,
             args.date_to,
           );
-          kiwi.getLogs().slice(-10).forEach(addLog);
+          kiwi.getLogs().forEach(addLog); // add all logs once after everything
 
           if (flights.length > 0) {
             toolResult = JSON.stringify(flights);
@@ -310,6 +309,7 @@ export async function runAgent(
             toolResult = JSON.stringify({ message: "Рейсы не найдены. Попробуйте другие даты или маршрут." });
           }
         } else {
+          kiwi.getLogs().forEach(addLog);
           toolResult = JSON.stringify({ error: "Не удалось подключиться к Kiwi MCP" });
         }
       } else if (fnName === "search_hotels") {
@@ -318,7 +318,10 @@ export async function runAgent(
         const hotels = await trivago.searchHotels(cityEn, args.check_in, args.check_out);
         trivago.getLogs().forEach(addLog);
 
-        if (hotels.length > 0) {
+        if (trivago.rawContent) {
+          // Pass Trivago's formatted response directly — it contains GPT formatting instructions
+          toolResult = trivago.rawContent;
+        } else if (hotels.length > 0) {
           toolResult = JSON.stringify(hotels);
         } else {
           toolResult = JSON.stringify({ message: `Отели в ${cityEn} не найдены. Попробуйте другие даты.` });

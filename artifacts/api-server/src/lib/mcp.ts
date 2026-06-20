@@ -54,6 +54,8 @@ export interface FoursquarePlace {
   rating?: string;
 }
 
+// ─── Kiwi MCP Client ────────────────────────────────────────────────────────
+
 export class KiwiMcpClient {
   private sessionId: string | null = null;
   private baseUrl = "https://mcp.kiwi.com";
@@ -110,7 +112,7 @@ export class KiwiMcpClient {
         }
       }
 
-      this.log("info", "Kiwi MCP: сессия без явного ID, продолжаем без sessionId");
+      this.log("init", "Kiwi MCP готов (без явного Session ID)");
       return true;
     } catch (err) {
       this.log("error", `Ошибка подключения к Kiwi: ${String(err)}`);
@@ -122,20 +124,22 @@ export class KiwiMcpClient {
     from: string,
     to: string,
     dateFrom: string,
-    dateTo?: string,
+    returnDate?: string,
   ): Promise<KiwiFlightResult[]> {
     this.log("tool_call", `Вызов search-flight: ${from} → ${to}, дата: ${dateFrom}`);
-    const args = {
+    const args: Record<string, unknown> = {
       flyFrom: from,
       flyTo: to,
       departureDate: dateFrom,
-      ...(dateTo && dateTo !== dateFrom ? { returnDate: dateTo } : {}),
       passengers: { adults: 1, children: 0, infants: 0 },
       curr: "EUR",
       locale: "ru",
       sort: "price",
     };
-    this.log("tool_args", "Аргументы запроса", args);
+    if (returnDate && returnDate !== dateFrom) {
+      args.returnDate = returnDate;
+    }
+    this.log("tool_args", "Аргументы запроса", args as object);
 
     try {
       const headers: Record<string, string> = {
@@ -158,7 +162,7 @@ export class KiwiMcpClient {
       });
 
       const text = await response.text();
-      this.log("tool_response", "Ответ от Kiwi MCP получен", { status: response.status, preview: text.slice(0, 300) });
+      const preview = text.slice(0, 400);
 
       let data: unknown;
       try {
@@ -175,7 +179,9 @@ export class KiwiMcpClient {
         }
       }
 
-      return this.parseFlightResults(data);
+      const flights = this.parseFlightResults(data);
+      this.log("tool_response", `Kiwi ответил: найдено ${flights.length} рейсов`, { status: response.status, preview });
+      return flights;
     } catch (err) {
       this.log("error", `Ошибка поиска рейсов: ${String(err)}`);
       return [];
@@ -194,14 +200,15 @@ export class KiwiMcpClient {
         if (typeof text === "string") {
           try {
             const parsed = JSON.parse(text);
-            const flights = parsed?.data?.flights ?? parsed?.itineraries ?? parsed?.flights ?? [parsed];
-            for (const f of Array.isArray(flights) ? flights : []) {
+            const flights = Array.isArray(parsed) ? parsed : [parsed];
+            for (const f of flights) {
+              if (!f || typeof f !== "object") continue;
               results.push({
-                route: `${f.cityFrom ?? f.from ?? "?"} → ${f.cityTo ?? f.to ?? "?"}`,
-                date: f.local_departure ?? f.departure ?? f.date ?? "?",
+                route: `${f.cityFrom ?? f.flyFrom ?? "?"} → ${f.cityTo ?? f.flyTo ?? "?"}`,
+                date: f.departure?.local ?? f.departure?.utc ?? "?",
                 airline: f.airlines?.[0] ?? f.airline ?? "?",
-                price: f.price ? `${f.price} ${f.currency ?? "EUR"}` : "Уточните на сайте",
-                link: f.deep_link ?? f.link,
+                price: f.price ? `${f.price} ${f.curr ?? "EUR"}` : "Уточните на сайте",
+                link: f.deep_link ?? f.link ?? f.bookingLink,
                 raw: f,
               });
             }
@@ -210,7 +217,7 @@ export class KiwiMcpClient {
               route: "Результат",
               date: "?",
               airline: "?",
-              price: text.substring(0, 200),
+              price: text.slice(0, 200),
             });
           }
         }
@@ -222,8 +229,11 @@ export class KiwiMcpClient {
   }
 }
 
+// ─── Trivago MCP Client ──────────────────────────────────────────────────────
+
 export class TrivagoMcpClient {
   private baseUrl = "https://mcp.trivago.com/mcp";
+  private sessionId: string | null = null;
   private logs: McpLogEntry[] = [];
 
   getLogs(): McpLogEntry[] {
@@ -236,105 +246,95 @@ export class TrivagoMcpClient {
     logger.info({ mcpLog: entry }, "Trivago MCP");
   }
 
-  async searchHotels(cityEn: string, checkIn: string, checkOut: string): Promise<TrivagoHotelResult[]> {
-    this.logs = [];
+  private async initialize(): Promise<boolean> {
     this.log("connect", `Подключение к Trivago MCP: ${this.baseUrl}`);
-
-    // Step 1: search suggestions
-    this.log("tool_call", `trivago-search-suggestions: запрос "${cityEn}"`);
-    this.log("tool_args", "Аргументы запроса", { query: cityEn });
-
-    let locationId: string | null = null;
-    let ns: string | null = null;
-
     try {
-      const sugResp = await fetch(this.baseUrl, {
+      const resp = await fetch(this.baseUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           jsonrpc: "2.0",
-          method: "tools/call",
-          params: { name: "trivago-search-suggestions", arguments: { query: cityEn } },
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "travel-assistant", version: "1.0.0" },
+          },
           id: 1,
         }),
       });
 
-      const sugText = await sugResp.text();
-      this.log("tool_response", "Ответ trivago-search-suggestions получен", { status: sugResp.status });
-
-      let sugData: unknown;
-      try {
-        sugData = JSON.parse(sugText);
-      } catch {
-        const lines = sugText.split("\n").filter((l) => l.startsWith("data:"));
-        for (const line of lines) {
-          try { sugData = JSON.parse(line.replace("data:", "").trim()); break; } catch { /* continue */ }
-        }
+      const sid = resp.headers.get("mcp-session-id");
+      if (sid) {
+        this.sessionId = sid;
+        this.log("init", `Trivago сессия инициализирована. Session ID: ${sid}`);
+        return true;
       }
 
-      const sugResult = (sugData as Record<string, unknown>)?.result;
-      const sugContent = (sugResult as Record<string, unknown>)?.content;
-      const sugItems = Array.isArray(sugContent) ? sugContent : [];
-      for (const item of sugItems) {
-        const text = (item as Record<string, unknown>)?.text;
-        if (typeof text === "string") {
-          try {
-            const parsed = JSON.parse(text);
-            const sug = parsed?.suggestions?.[0] ?? parsed?.[0] ?? parsed;
-            if (sug?.id) { locationId = String(sug.id); ns = String(sug.ns ?? sug.namespace ?? ""); break; }
-          } catch { /* continue */ }
-        }
-      }
-
-      if (!locationId) {
-        this.log("error", "Не удалось получить location ID от Trivago");
-        return [];
-      }
-
-      this.log("info", `Получен location ID: ${locationId}, ns: ${ns}`);
+      this.log("error", "Trivago: не получен mcp-session-id");
+      return false;
     } catch (err) {
-      this.log("error", `Ошибка trivago-search-suggestions: ${String(err)}`);
-      return [];
+      this.log("error", `Ошибка подключения к Trivago: ${String(err)}`);
+      return false;
+    }
+  }
+
+  rawContent: string | null = null;
+
+  async searchHotels(cityEn: string, checkIn: string, checkOut: string): Promise<TrivagoHotelResult[]> {
+    this.logs = [];
+    this.rawContent = null;
+
+    const ok = await this.initialize();
+    if (!ok) return [];
+
+    // Ensure at least a 2-night stay (Trivago requires departure > arrival by ≥1 day; some queries end up same-day)
+    let departure = checkOut;
+    if (departure <= checkIn) {
+      const d = new Date(checkIn);
+      d.setDate(d.getDate() + 1);
+      departure = d.toISOString().slice(0, 10);
     }
 
-    // Step 2: accommodation search
-    this.log("tool_call", `trivago-accommodation-search: id=${locationId}, ns=${ns}`);
-    const accomArgs = {
-      id: locationId,
-      ns,
-      check_in: checkIn,
-      check_out: checkOut,
+    this.log("tool_call", `trivago-accommodation-search: "${cityEn}", заезд ${checkIn} → выезд ${departure}`);
+    const args = {
+      query: cityEn,
+      arrival: checkIn,
+      departure,
       adults: 2,
-      limit: 5,
     };
-    this.log("tool_args", "Аргументы запроса", accomArgs);
+    this.log("tool_args", "Аргументы запроса", args);
 
     try {
-      const accomResp = await fetch(this.baseUrl, {
+      const resp = await fetch(this.baseUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
+        },
         body: JSON.stringify({
           jsonrpc: "2.0",
           method: "tools/call",
-          params: { name: "trivago-accommodation-search", arguments: accomArgs },
+          params: { name: "trivago-accommodation-search", arguments: args },
           id: 2,
         }),
       });
 
-      const accomText = await accomResp.text();
-      this.log("tool_response", "Ответ trivago-accommodation-search получен", { status: accomResp.status });
+      const text = await resp.text();
 
-      let accomData: unknown;
+      let data: unknown;
       try {
-        accomData = JSON.parse(accomText);
+        data = JSON.parse(text);
       } catch {
-        const lines = accomText.split("\n").filter((l) => l.startsWith("data:"));
+        const lines = text.split("\n").filter((l) => l.startsWith("data:"));
         for (const line of lines) {
-          try { accomData = JSON.parse(line.replace("data:", "").trim()); break; } catch { /* continue */ }
+          try { data = JSON.parse(line.replace("data:", "").trim()); break; } catch { /* continue */ }
         }
       }
 
-      return this.parseHotelResults(accomData);
+      const hotels = this.parseHotelResults(data);
+      this.log("tool_response", `Trivago ответил: найдено ${hotels.length} отелей`, { status: resp.status });
+      return hotels;
     } catch (err) {
       this.log("error", `Ошибка trivago-accommodation-search: ${String(err)}`);
       return [];
@@ -347,24 +347,35 @@ export class TrivagoMcpClient {
       const content = (result as Record<string, unknown>)?.content;
       const items = Array.isArray(content) ? content : [];
       const results: TrivagoHotelResult[] = [];
+
       for (const item of items) {
-        const text = (item as Record<string, unknown>)?.text;
-        if (typeof text === "string") {
-          try {
-            const parsed = JSON.parse(text);
-            const hotels = parsed?.accommodations ?? parsed?.hotels ?? parsed?.results ?? [parsed];
-            for (const h of Array.isArray(hotels) ? hotels : []) {
-              results.push({
-                name: h.name ?? h.hotel_name ?? "Отель",
-                rating: h.rating ? String(h.rating) : undefined,
-                price: h.price ? `${h.price} ${h.currency ?? "EUR"}` : undefined,
-                address: h.address ?? h.location,
-                link: h.url ?? h.deep_link ?? h.link,
-              });
-            }
-          } catch {
-            results.push({ name: "Результат", price: text.substring(0, 200) });
+        const rawText = (item as Record<string, unknown>)?.text;
+        if (typeof rawText !== "string") continue;
+
+        // Store raw content so agent can pass it directly to GPT
+        this.rawContent = rawText;
+
+        try {
+          // Trivago wraps hotels in { "output": "[...JSON array...]", "system_message": "..." }
+          const outer = JSON.parse(rawText);
+          const outputStr = outer?.output ?? rawText;
+          const hotels = typeof outputStr === "string"
+            ? JSON.parse(outputStr)
+            : (Array.isArray(outputStr) ? outputStr : []);
+
+          for (const h of Array.isArray(hotels) ? hotels : []) {
+            if (!h || typeof h !== "object") continue;
+            results.push({
+              name: h.accommodation_name ?? h.name ?? "Отель",
+              rating: h.review_rating ?? h.hotel_rating != null ? `${h.review_rating ?? ""} (${h.hotel_rating ?? "?"}★)` : undefined,
+              price: h.price_per_night ? `${h.price_per_night}/ночь (итого ${h.price_per_stay ?? "?"})` : undefined,
+              address: h.country_city ?? h.address,
+              link: h.accommodation_url ?? h.url,
+            });
           }
+        } catch {
+          // If JSON parsing fails, surface the raw text
+          results.push({ name: "Результат", price: rawText.slice(0, 400) });
         }
       }
       return results;
@@ -373,6 +384,8 @@ export class TrivagoMcpClient {
     }
   }
 }
+
+// ─── Foursquare MCP Client ───────────────────────────────────────────────────
 
 export class FoursquareMcpClient {
   private baseUrl = "https://gateway.pipeworx.io/foursquare/mcp";
@@ -413,8 +426,6 @@ export class FoursquareMcpClient {
       });
 
       const text = await resp.text();
-      this.log("tool_response", "Ответ Foursquare MCP получен", { status: resp.status });
-
       let data: unknown;
       try {
         data = JSON.parse(text);
@@ -425,7 +436,9 @@ export class FoursquareMcpClient {
         }
       }
 
-      return this.parsePlaceResults(data);
+      const places = this.parsePlaceResults(data);
+      this.log("tool_response", `Foursquare ответил: найдено ${places.length} мест`, { status: resp.status });
+      return places;
     } catch (err) {
       this.log("error", `Ошибка Foursquare: ${String(err)}`);
       return [];
@@ -443,8 +456,9 @@ export class FoursquareMcpClient {
         if (typeof text === "string") {
           try {
             const parsed = JSON.parse(text);
-            const places = parsed?.results ?? parsed?.places ?? parsed?.venues ?? [parsed];
+            const places = parsed?.results ?? parsed?.places ?? parsed?.venues ?? (Array.isArray(parsed) ? parsed : [parsed]);
             for (const p of Array.isArray(places) ? places : []) {
+              if (!p || typeof p !== "object") continue;
               results.push({
                 name: p.name ?? "Место",
                 description: p.categories?.[0]?.name ?? p.description,
@@ -453,7 +467,7 @@ export class FoursquareMcpClient {
               });
             }
           } catch {
-            results.push({ name: "Результат", description: text.substring(0, 200) });
+            results.push({ name: "Результат", description: text.slice(0, 200) });
           }
         }
       }
